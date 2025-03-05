@@ -28,14 +28,6 @@ namespace cc
         slow_lock_info_t *lock;
     };
 
-    struct __align__(8) SlowDynamicTwoPLInfo
-    {
-        char *for_update;
-
-        __host__ __device__ SlowDynamicTwoPLInfo() {}
-        __host__ __device__ SlowDynamicTwoPLInfo(char *for_update) : for_update(for_update) {}
-    };
-
 #ifndef SLOW_TPL_RUN
 #define SLOW_TPL_LATCH_TABLE 0
 #define SLOW_LOCK_TABLE 0
@@ -60,11 +52,8 @@ namespace cc
 
 #ifdef DYNAMIC_RW_COUNT
         common::DynamicTransactionSet_GPU *txset_info;
-        char *for_update;
         int rcnt;
         int wcnt;
-#else
-        char for_update[RCNT];
 #endif
 
         __device__ Slow_TwoPL_GPU(void *txs_info, void *info, size_t tid)
@@ -76,10 +65,8 @@ namespace cc
             txset_info = (common::DynamicTransactionSet_GPU *)txs_info;
             rcnt = txset_info->tx_rcnt[self_tid];
             wcnt = txset_info->tx_wcnt[self_tid];
-            SlowDynamicTwoPLInfo *tinfo = (SlowDynamicTwoPLInfo *)info;
             lock_hold_info_r = ((slow_lock_info_t **)SLOW_LOCK_HOLD_INFO_R) + txset_info->tx_rcnt_st[self_tid];
             lock_hold_info_w = ((SlowTPLWriteInfo *)SLOW_LOCK_HOLD_INFO_W) + txset_info->tx_wcnt_st[self_tid];
-            for_update = tinfo->for_update + txset_info->tx_rcnt_st[self_tid];
 
 #ifdef TX_DEBUG
             self_events = ((common::Event *)EVENTS_ST) + txset_info->tx_opcnt_st[self_tid] + self_tid;
@@ -100,7 +87,6 @@ namespace cc
         {
             st_time = clock64();
             self_metrics.wait_duration = 0;
-            memset(for_update, 0, sizeof(bool) * RCNT);
             max_r = max_w = -1;
             self_metrics.manager_duration = clock64() - st_time;
             return true;
@@ -115,12 +101,7 @@ namespace cc
 #endif
 #pragma unroll
             for (int i = 0; i < RCNT; i++)
-            {
-                if (for_update[i])
-                    unlock_exclusive(lock_hold_info_r[i]);
-                else
-                    unlock_shared(lock_hold_info_r[i]);
-            }
+                unlock_shared(lock_hold_info_r[i]);
 
 #pragma unroll
             for (int i = 0; i < WCNT; i++)
@@ -172,7 +153,6 @@ namespace cc
                 return false;
             }
             max_r = max(max_r, tx_idx);
-            for_update[tx_idx] = 1;
             lock_hold_info_r[tx_idx] = info;
             memcpy(dstdata, srcdata, size);
             self_metrics.manager_duration += clock64() - manager_st_time;
@@ -343,13 +323,7 @@ namespace cc
             // printf("%lld RB %lld\n", self_tid, self_metrics.abort);
 #pragma unroll
             for (int i = 0; i <= max_r; i++)
-            {
-                if (for_update[i])
-                    unlock_exclusive(lock_hold_info_r[i]);
-                else
-                    unlock_shared(lock_hold_info_r[i]);
-            }
-
+                unlock_shared(lock_hold_info_r[i]);
 #pragma unroll
             for (int i = 0; i <= max_w; i++)
                 unlock_exclusive(lock_hold_info_w[i].lock);
@@ -367,7 +341,6 @@ namespace cc
         slow_lock_info_t *lock_table;
         slow_lock_info_t **lock_hold_info_r;
         SlowTPLWriteInfo *lock_hold_info_w;
-        char *for_update;
 
         common::TransactionSet_CPU *info;
         common::DB_CPU *db_cpu;
@@ -379,6 +352,7 @@ namespace cc
             : info(txinfo),
               db_cpu(db),
               wait_die(wait_die),
+              twopl_gpu_info(nullptr),
               dynamic(typeid(*info) == typeid(common::DynamicTransactionSet_CPU)),
               ConcurrencyControlCPUBase(bsize, txinfo->GetTxCnt(), db->table_st[db->table_cnt])
         {
@@ -390,20 +364,12 @@ namespace cc
                 common::DynamicTransactionSet_CPU *dyinfo = dynamic_cast<common::DynamicTransactionSet_CPU *>(info);
                 cudaMalloc(&lock_hold_info_r, sizeof(slow_lock_info_t *) * dyinfo->GetTotR());
                 cudaMalloc(&lock_hold_info_w, sizeof(SlowTPLWriteInfo) * dyinfo->GetTotW());
-                cudaMalloc(&for_update, sizeof(char) * dyinfo->GetTotR());
-
-                SlowDynamicTwoPLInfo *tmp = new SlowDynamicTwoPLInfo(for_update);
-                cudaMalloc(&twopl_gpu_info, sizeof(SlowDynamicTwoPLInfo));
-                cudaMemcpy(twopl_gpu_info, tmp, sizeof(SlowDynamicTwoPLInfo), cudaMemcpyHostToDevice);
-                delete tmp;
             }
             else
             {
                 common::StaticTransactionSet_CPU *stinfo = dynamic_cast<common::StaticTransactionSet_CPU *>(info);
                 cudaMalloc(&lock_hold_info_r, sizeof(slow_lock_info_t *) * stinfo->rcnt * stinfo->tx_cnt);
                 cudaMalloc(&lock_hold_info_w, sizeof(SlowTPLWriteInfo) * stinfo->wcnt * stinfo->tx_cnt);
-
-                twopl_gpu_info = nullptr;
             }
         }
 
@@ -438,7 +404,6 @@ namespace cc
             {
                 common::DynamicTransactionSet_CPU *dyinfo = (common::DynamicTransactionSet_CPU *)info;
                 return common_sz +
-                       sizeof(SlowDynamicTwoPLInfo) +
                        sizeof(slow_lock_info_t *) * dyinfo->GetTotR() + sizeof(SlowTPLWriteInfo) * dyinfo->GetTotW() +
                        sizeof(bool) * dyinfo->GetTotR() +
                        sizeof(int) * tx_cnt * 2 +

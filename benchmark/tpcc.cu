@@ -89,9 +89,9 @@ __launch_bounds__(1024)
         // // warehouse
         // warehouses[warehouse_idx].ytd += tx.h_amount;
         void *warehousep = (void *)(table_warehouse.data + warehouse_idx * sizeof(Warehouse));
-
+        size_t abs_warehouse_idx = table_st_arr[TABLE_WAREHOUSE] + warehouse_idx;
         if (!cc.ReadForUpdate(
-                table_st_arr[TABLE_WAREHOUSE] + warehouse_idx,
+                abs_warehouse_idx,
                 0,
                 warehousep,
                 // warehousep,
@@ -101,20 +101,29 @@ __launch_bounds__(1024)
 
         warehouse.ytd += tx.h_amount;
 
-        if (!cc.Write(table_st_arr[TABLE_WAREHOUSE] + warehouse_idx,
-                      0,
-                      (void *)&warehouse,
-                      // warehousep,
-                      warehousep,
-                      sizeof(Warehouse)))
-            continue;
+#if defined(GPUTX_RUN) || defined(GACCO_RUN)
+        cc.ReadForUpdateEnd(
+            abs_warehouse_idx,
+            (void *)&warehouse,
+            warehousep,
+            sizeof(Warehouse));
+#endif
+
+        // if (!cc.Write(table_st_arr[TABLE_WAREHOUSE] + warehouse_idx,
+        //               0,
+        //               (void *)&warehouse,
+        //               // warehousep,
+        //               warehousep,
+        //               sizeof(Warehouse)))
+        //     continue;
 
         // // district
         // districts[district_idx].ytd += tx.h_amount;
-        void *districtp = (void *)(table_district.data + district_idx * sizeof(District));
 
+        void *districtp = (void *)(table_district.data + district_idx * sizeof(District));
+        size_t abs_district_idx = table_st_arr[TABLE_DISTRICT] + district_idx;
         if (!cc.ReadForUpdate(
-                table_st_arr[TABLE_DISTRICT] + district_idx,
+                abs_district_idx,
                 1,
                 districtp,
                 // districtp,
@@ -124,14 +133,22 @@ __launch_bounds__(1024)
 
         district.ytd += tx.h_amount;
 
-        if (!cc.Write(
-                table_st_arr[TABLE_DISTRICT] + district_idx,
-                1,
-                (void *)&district,
-                // districtp,
-                districtp,
-                sizeof(District)))
-            continue;
+#if defined(GPUTX_RUN) || defined(GACCO_RUN)
+        cc.ReadForUpdateEnd(
+            abs_district_idx,
+            (void *)&district,
+            districtp,
+            sizeof(District));
+#endif
+
+        // if (!cc.Write(
+        //         table_st_arr[TABLE_DISTRICT] + district_idx,
+        //         1,
+        //         (void *)&district,
+        //         // districtp,
+        //         districtp,
+        //         sizeof(District)))
+        //     continue;
 
         // // customer
         // customers[customer_idx].balance -= tx.h_amount;
@@ -139,9 +156,9 @@ __launch_bounds__(1024)
         // customers[customer_idx].payment_cnt += 1;
 
         void *customerp = (void *)(table_customer.data + customer_idx * sizeof(Customer));
-
+        size_t abs_customer_idx = table_st_arr[TABLE_CUSTOMER] + customer_idx;
         if (!cc.ReadForUpdate(
-                table_st_arr[TABLE_CUSTOMER] + customer_idx,
+                abs_customer_idx,
                 2,
                 customerp,
                 // customerp,
@@ -153,14 +170,22 @@ __launch_bounds__(1024)
         customer.ytd_payment += tx.h_amount;
         customer.payment_cnt += 1;
 
-        if (!cc.Write(
-                table_st_arr[TABLE_CUSTOMER] + customer_idx,
-                2,
-                (void *)&customer,
-                // customerp,
-                customerp,
-                sizeof(Customer)))
-            continue;
+#if defined(GPUTX_RUN) || defined(GACCO_RUN)
+        cc.ReadForUpdateEnd(
+            abs_customer_idx,
+            (void *)&customer,
+            customerp,
+            sizeof(Customer));
+#endif
+
+        // if (!cc.Write(
+        //         table_st_arr[TABLE_CUSTOMER] + customer_idx,
+        //         2,
+        //         (void *)&customer,
+        //         // customerp,
+        //         customerp,
+        //         sizeof(Customer)))
+        //     continue;
 
         if (!cc.TxEnd(NULL))
             continue;
@@ -257,8 +282,9 @@ __launch_bounds__(1024)
         // next_o_ids[district_idx] += 1;
 
         void *districtp = (void *)(table_district.data + district_idx * sizeof(District));
+        size_t abs_district_idx = table_st_arr[TABLE_DISTRICT] + district_idx;
         if (!cc.ReadForUpdate(
-                table_st_arr[TABLE_DISTRICT] + district_idx,
+                abs_district_idx,
                 0,
                 districtp,
                 (void *)&district,
@@ -270,15 +296,23 @@ __launch_bounds__(1024)
         cur_o_id = district.next_o_id;
         district.next_o_id++;
 
-        if (!cc.Write(
-                table_st_arr[TABLE_DISTRICT] + district_idx,
-                0,
-                (void *)&district,
-                districtp,
-                sizeof(District)))
-        {
-            continue;
-        }
+#if defined(GPUTX_RUN) || defined(GACCO_RUN)
+        cc.ReadForUpdateEnd(
+            abs_district_idx,
+            (void *)&district,
+            districtp,
+            sizeof(District));
+#endif
+
+        // if (!cc.Write(
+        //         table_st_arr[TABLE_DISTRICT] + district_idx,
+        //         0,
+        //         (void *)&district,
+        //         districtp,
+        //         sizeof(District)))
+        // {
+        //     continue;
+        // }
 
         bool success1 = true;
         sum_ol_amount = 0;
@@ -304,9 +338,9 @@ __launch_bounds__(1024)
             // char *the_s_dist = (char *)((char *)(stocks + s_idx) + offsetof(data_row::Stock, dist00) + the_tx.d_id * sizeof(char[25]));
 
             void *stockp = (void *)(table_stock.data + stock_idx * sizeof(Stock));
-
+            size_t abs_stock_idx = table_st_arr[TABLE_STOCK] + stock_idx;
             if (!cc.ReadForUpdate(
-                    table_st_arr[TABLE_STOCK] + stock_idx,
+                    abs_stock_idx,
                     ol_idx + 1,
                     stockp,
                     &stock,
@@ -326,16 +360,24 @@ __launch_bounds__(1024)
             stock.order_cnt += 1;
             stock.remote_cnt += (unsigned int)(the_ol_item.supply_w_id != tx.w_id);
 
-            if (!cc.Write(
-                    table_st_arr[TABLE_STOCK] + stock_idx,
-                    ol_idx + 1,
-                    &stock,
-                    stockp,
-                    sizeof(Stock)))
-            {
-                success1 = false;
-                break;
-            }
+#if defined(GPUTX_RUN) || defined(GACCO_RUN)
+            cc.ReadForUpdateEnd(
+                abs_stock_idx,
+                (void *)&stock,
+                stockp,
+                sizeof(Stock));
+#endif
+
+            // if (!cc.Write(
+            //         table_st_arr[TABLE_STOCK] + stock_idx,
+            //         ol_idx + 1,
+            //         &stock,
+            //         stockp,
+            //         sizeof(Stock)))
+            // {
+            //     success1 = false;
+            //     break;
+            // }
 
             sum_ol_amount += the_ol_item.quantity * item_price;
 

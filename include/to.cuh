@@ -164,7 +164,8 @@ namespace cc
                     common::AddEvent(self_events + tx_idx, obj_idx, ts1.ll, self_ts, self_tid, 0);
 #endif
                     fail = atomicCAS(&(entry->ll), ts1.ll, ts2.ll) != ts1.ll;
-                    if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                    if (fail)
+                        self_metrics.wait_duration += clock64() - wait_st_time;
                 }
                 else
                 {
@@ -190,7 +191,49 @@ namespace cc
             void *dstdata,
             size_t size)
         {
-            return Read(obj_idx, tx_idx, srcdata, dstdata, size);
+            unsigned long long manager_st_time = clock64();
+            to_timestamp_t *entry = ((to_timestamp_t *)TO_TS_TABLE) + obj_idx;
+            WriteInfo *winfo = write_info + tx_idx;
+            winfo->tsp = entry;
+
+            bool fail = true;
+            to_timestamp_t ts1, ts2;
+            do
+            {
+                unsigned long long wait_st_time = clock64();
+                ts2.ll = ts1.ll = ((volatile to_timestamp_t *)entry)->ll;
+                if (ts1.s.rts > self_ts || ts1.s.wts > self_ts || ts1.s.uncommited) // TODO Thomas
+                    break;
+                winfo->srcdata = dstdata;
+                winfo->dstdata = srcdata;
+                winfo->size = size;
+                winfo->prev_ts.ll = ts1.ll;
+
+                ts2.s.uncommited = 1;
+                ts2.s.wts = self_ts;
+                ts2.s.rts = self_ts;
+
+                memcpy(dstdata, srcdata, size);
+
+                fail = atomicCAS(&(entry->ll), ts1.ll, ts2.ll) != ts1.ll;
+                if (fail)
+                    self_metrics.wait_duration += clock64() - wait_st_time;
+            } while (fail);
+            __threadfence();
+
+            if (fail)
+            {
+                rollback();
+                return false;
+            }
+
+#ifdef TX_DEBUG
+            common::AddEvent(self_events + RCNT + tx_idx, obj_idx, ts1.ll, self_ts, self_tid, 1);
+#endif
+
+            has_wts[tx_idx] = true;
+            self_metrics.manager_duration += clock64() - manager_st_time;
+            return true;
         }
 
         __device__ bool Write(
@@ -223,7 +266,8 @@ namespace cc
                 ts2.s.rts = self_ts;
 
                 fail = atomicCAS(&(entry->ll), ts1.ll, ts2.ll) != ts1.ll;
-                if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                if (fail)
+                    self_metrics.wait_duration += clock64() - wait_st_time;
             } while (fail);
             __threadfence();
 

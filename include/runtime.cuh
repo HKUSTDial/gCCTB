@@ -178,6 +178,7 @@ namespace common
             float index_duration = host_metrics.index_duration * inv;     //
 
             std::fstream of;
+            std::cout << bench_name + ".txt\n";
             of.open(bench_name + ".txt", std::ios::out | std::ios::app);
             of << cc_type << ","
                << valid_txn_bitoffset << ","

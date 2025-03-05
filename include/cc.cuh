@@ -77,6 +77,12 @@ namespace common
             void *dstdata,
             size_t size);
 
+        __device__ void ReadForUpdateEnd(
+            size_t obj_idx,
+            void *srcdata,
+            void *dstdata,
+            size_t size);
+
         __device__ bool Write(
             size_t obj_idx,
             int tx_idx,

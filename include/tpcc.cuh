@@ -1,6 +1,17 @@
 #ifndef TPCC_H
 #define TPCC_H
 
+#ifndef NVRTC_COMPILE
+
+#include <table.cuh>
+#include <generator.cuh>
+#include <type.cuh>
+#include <cc.cuh>
+#include <db.cuh>
+#include <vector>
+
+#endif
+
 #define DISTRICTS_PER_W 10
 #define CUSTOMERS_PER_D 3000
 #define ITEMS_NUM 100000
@@ -231,6 +242,59 @@ namespace tpcc
             return supply_w_id < ano.supply_w_id;
         }
     };
+
+    extern std::vector<common::TypeWithSize> infos_warehouse;
+    extern std::vector<common::GeneratorBase *> gens_warehouse;
+    extern std::vector<common::TypeWithSize> infos_district;
+    extern std::vector<common::GeneratorBase *> gens_district;
+    extern std::vector<common::TypeWithSize> infos_customer;
+    extern std::vector<common::GeneratorBase *> gens_customer;
+    extern std::vector<common::TypeWithSize> infos_item;
+    extern std::vector<common::GeneratorBase *> gens_item;
+    extern std::vector<common::TypeWithSize> infos_stock;
+    extern std::vector<common::GeneratorBase *> gens_stock;
+    extern std::vector<common::TypeWithSize> infos_history;
+    extern std::vector<common::GeneratorBase *> gens_history;
+    extern std::vector<common::TypeWithSize> infos_order;
+    extern std::vector<common::GeneratorBase *> gens_order;
+    extern std::vector<common::TypeWithSize> infos_neworder;
+    extern std::vector<common::GeneratorBase *> gens_neworder;
+    extern std::vector<common::TypeWithSize> infos_orderline;
+    extern std::vector<common::GeneratorBase *> gens_orderline;
+
+    const int SEED = 141919810;
+
+    struct NewOrderReq
+    {
+        int read;
+        unsigned int key1;
+        unsigned int key2;
+
+        NewOrderReq() {}
+        NewOrderReq(int read, unsigned int key1, unsigned int key2)
+            : read(read), key1(key1), key2(key2) {}
+    };
+
+    struct TaskInfo
+    {
+        common::TransactionSet_CPU *txinfo;
+        char *gpu_txs;
+        char *gpu_gaccotxs;
+        void *output;
+
+        TaskInfo() {}
+        TaskInfo(common::TransactionSet_CPU *txinfo,
+                 char *gpu_txs,
+                 char *gpu_gaccotxs,
+                 void *output) : txinfo(txinfo), gpu_txs(gpu_txs), gpu_gaccotxs(gpu_gaccotxs), output(output) {}
+    };
+
+    void InitTables(int warehouse_cnt, int txcnt, common::DB_CPU &db, common::DB_GPU *&db_gpu);
+    TaskInfo *PaymentPre0(int warehouse_cnt, int txcnt, common::DB_CPU &db);
+    TaskInfo *NewOrderPre0(int warehouse_cnt, int txcnt, common::DB_CPU &db);
+
+    extern common::StructType payment_struct_type;
+    extern common::StructType neworder_struct_type;
 
 #endif
 

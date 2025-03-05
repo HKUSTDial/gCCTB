@@ -37,14 +37,6 @@ namespace cc
         size_t size;
     };
 
-    struct __align__(8) SlowDynamicTictocInfo
-    {
-        char *for_update;
-
-        __host__ __device__ SlowDynamicTictocInfo() {}
-        __host__ __device__ SlowDynamicTictocInfo(char *for_update) : for_update(for_update) {}
-    };
-
 #ifndef SLOW_TICTOC_RUN
 
 #define SLOW_TICTOC_LATCH_TABLE 0
@@ -64,11 +56,8 @@ namespace cc
 
 #ifdef DYNAMIC_RW_COUNT
         common::DynamicTransactionSet_GPU *txset_info;
-        char *for_update;
         int rcnt;
         int wcnt;
-#else
-        char for_update[RCNT];
 #endif
 
 #ifdef TX_DEBUG
@@ -84,8 +73,6 @@ namespace cc
             txset_info = (common::DynamicTransactionSet_GPU *)txs_info;
             rcnt = txset_info->tx_rcnt[tid];
             wcnt = txset_info->tx_wcnt[tid];
-            SlowDynamicTictocInfo *tinfo = (SlowDynamicTictocInfo *)info;
-            for_update = tinfo->for_update + txset_info->tx_rcnt_st[tid];
             self_r_replica_entries = ((slow_replica_entry *)SLOW_TICTOC_REPLICA_ENTRIES) + txset_info->tx_opcnt_st[tid];
 #ifdef TX_DEBUG
             self_events = ((common::Event *)EVENTS_ST) + txset_info->tx_opcnt_st[self_tid] + self_tid;
@@ -105,7 +92,6 @@ namespace cc
         {
             st_time = clock64();
             self_metrics.wait_duration = 0;
-            memset(for_update, 0, sizeof(char) * RCNT);
             self_metrics.manager_duration = clock64() - st_time;
             return true;
         }
@@ -153,7 +139,6 @@ namespace cc
                 srcdata,
                 dstdata,
                 size);
-            for_update[tx_idx] = 1;
             self_metrics.manager_duration += clock64() - manager_st_time;
             return true;
         }
@@ -298,9 +283,7 @@ namespace cc
                     rts = ts1.s.wts + ts1.s.delta;
                     if (
                         RS[i].wts != wts ||
-                        (rts <= commit_ts &&
-                         ts1.s.lock_bit &&
-                         !for_update[i]))
+                        (rts <= commit_ts && ts1.s.lock_bit))
                     {
                         for (int j = 0; j < WCNT; j++)
                             unlock(WS[j].entry);
@@ -362,7 +345,6 @@ namespace cc
         int *latch_table;
         slow_timestamp_t *ts_table;
         slow_replica_entry *replica_entries;
-        char *for_update;
 
         common::TransactionSet_CPU *info;
         common::DB_CPU *db_cpu;
@@ -372,26 +354,13 @@ namespace cc
         Slow_Tictoc_CPU(common::DB_CPU *db, common::TransactionSet_CPU *txinfo, size_t bsize)
             : info(txinfo),
               db_cpu(db),
+              tictoc_gpu_info(nullptr),
               dynamic(typeid(*info) == typeid(common::DynamicTransactionSet_CPU)),
               ConcurrencyControlCPUBase(bsize, txinfo->GetTxCnt(), db->table_st[db->table_cnt])
         {
             cudaMalloc(&ts_table, sizeof(slow_timestamp_t *) * db->table_st[db->table_cnt]);
             cudaMalloc(&latch_table, sizeof(int) * db->table_st[db->table_cnt]);
             cudaMalloc(&replica_entries, sizeof(slow_replica_entry) * txinfo->GetTotOpCnt());
-
-            if (dynamic)
-            {
-                common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                cudaMalloc(&for_update, sizeof(char) * dtx->GetTotR());
-                SlowDynamicTictocInfo *tmp = new SlowDynamicTictocInfo(for_update);
-                cudaMalloc(&tictoc_gpu_info, sizeof(SlowDynamicTictocInfo));
-                cudaMemcpy(tictoc_gpu_info, tmp, sizeof(SlowDynamicTictocInfo), cudaMemcpyHostToDevice);
-                delete tmp;
-            }
-            else
-            {
-                tictoc_gpu_info = nullptr;
-            }
         }
 
         void Init(int batch_id, int batch_st) override
@@ -421,7 +390,7 @@ namespace cc
             if (dynamic)
             {
                 common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                return common_sz + sizeof(int) * tx_cnt * 2 + sizeof(size_t) * (tx_cnt + 1) * 2 + sizeof(char) * dtx->GetTotR() + sizeof(SlowDynamicTictocInfo);
+                return common_sz + sizeof(int) * tx_cnt * 2 + sizeof(size_t) * (tx_cnt + 1) * 2 + sizeof(char) * dtx->GetTotR();
             }
             return common_sz;
         }

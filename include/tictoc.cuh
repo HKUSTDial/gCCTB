@@ -49,14 +49,6 @@ namespace cc
     //                                                                      replica_entries(replica_entries) {}
     // };
 
-    struct __align__(8) DynamicTictocInfo
-    {
-        char *for_update;
-
-        __host__ __device__ DynamicTictocInfo() {}
-        __host__ __device__ DynamicTictocInfo(char *for_update) : for_update(for_update) {}
-    };
-
 #ifndef TICTOC_RUN
 
 #define TICTOC_TS_TABLE 0
@@ -75,11 +67,8 @@ namespace cc
 
 #ifdef DYNAMIC_RW_COUNT
         common::DynamicTransactionSet_GPU *txset_info;
-        char *for_update;
         int rcnt;
         int wcnt;
-#else
-        char for_update[RCNT];
 #endif
 
 #ifdef TX_DEBUG
@@ -95,8 +84,6 @@ namespace cc
             txset_info = (common::DynamicTransactionSet_GPU *)txs_info;
             rcnt = txset_info->tx_rcnt[tid];
             wcnt = txset_info->tx_wcnt[tid];
-            DynamicTictocInfo *tinfo = (DynamicTictocInfo *)info;
-            for_update = tinfo->for_update + txset_info->tx_rcnt_st[tid];
             self_r_replica_entries = ((replica_entry *)TICTOC_REPLICA_ENTRIES) + txset_info->tx_opcnt_st[tid];
 #ifdef TX_DEBUG
             self_events = ((common::Event *)EVENTS_ST) + txset_info->tx_opcnt_st[self_tid] + self_tid;
@@ -115,7 +102,6 @@ namespace cc
         __device__ bool TxStart(void *info)
         {
             st_time = clock64();
-            memset(for_update, 0, sizeof(char) * RCNT);
             self_metrics.manager_duration = clock64() - st_time;
             self_metrics.wait_duration = 0;
             return true;
@@ -160,11 +146,10 @@ namespace cc
             unsigned long long manager_st_time = clock64();
             get_entry(
                 ((timestamp_t *)TICTOC_TS_TABLE) + obj_idx,
-                self_r_replica_entries + tx_idx,
+                self_w_replica_entries + tx_idx,
                 srcdata,
                 dstdata,
                 size);
-            for_update[tx_idx] = 1;
             self_metrics.manager_duration += clock64() - manager_st_time;
             return true;
         }
@@ -178,6 +163,7 @@ namespace cc
         {
             unsigned long long manager_st_time = clock64();
             replica_entry &entry = self_w_replica_entries[tx_idx];
+            entry.wts = ~0ULL;
             entry.entry = ((timestamp_t *)TICTOC_TS_TABLE) + obj_idx;
             entry.srcdata = srcdata;
             entry.dstdata = dstdata;
@@ -237,22 +223,23 @@ namespace cc
             //     memcpy(dstdata, srcdata, size);
             //     ts2.ll = ((volatile timestamp_t *)entry)->ll;
             // } while (ts1.ll != ts2.ll || ts1.s.lock_bit);
-            while(true)
+            while (true)
             {
                 unsigned long long wait_st_time = clock64();
                 ts1.ll = ((volatile timestamp_t *)entry)->ll;
                 memcpy(dstdata, srcdata, size);
                 ts2.ll = ((volatile timestamp_t *)entry)->ll;
-                if(ts1.ll != ts2.ll || ts1.s.lock_bit){
+                if (ts1.ll != ts2.ll || ts1.s.lock_bit)
+                {
                     self_metrics.wait_duration += clock64() - wait_st_time;
                     continue;
                 }
                 break;
             };
 #ifdef TX_DEBUG
-                common::AddEvent(self_events + (ret - self_r_replica_entries),
-                                 entry - ((timestamp_t *)TICTOC_TS_TABLE),
-                                 0, 0, self_tid, 0);
+            common::AddEvent(self_events + (ret - self_r_replica_entries),
+                             entry - ((timestamp_t *)TICTOC_TS_TABLE),
+                             0, 0, self_tid, 0);
 #endif
             ret->wts = ts1.s.wts;
             ret->rts = ts1.s.wts + ts1.s.delta;
@@ -264,12 +251,15 @@ namespace cc
             replica_entry *RS = self_r_replica_entries;
             replica_entry *WS = self_w_replica_entries;
 
+            unsigned long long commit_ts = 0;
+            unsigned long long rts;
+
             // TODO sort WS
-            long long lock_st_time = clock64();
             {
 #pragma unroll
                 for (int i = 0; i < WCNT; i++)
                 {
+                    long long lock_st_time = clock64();
                     if (!lock(WS[i].entry))
                     {
                         for (int j = 0; j < i; j++)
@@ -278,21 +268,27 @@ namespace cc
                         self_metrics.abort_duration += clock64() - st_time;
                         return ~0ULL;
                     }
+                    self_metrics.wait_duration += clock64() - lock_st_time;
+
+                    timestamp_t ts;
+                    ts.ll = ((volatile timestamp_t *)WS[i].entry)->ll;
+
+                    unsigned long long wts = WS[i].wts;
+                    if (wts != ~0ULL)
+                    {
+                        if (ts.s.wts != wts)
+                        {
+                            for (int j = 0; j <= i; j++)
+                                unlock(WS[j].entry);
+                            self_metrics.abort++;
+                            self_metrics.abort_duration += clock64() - st_time;
+                            return ~0ULL;
+                        }
+                    }
+
+                    rts = ts.s.wts + ts.s.delta;
+                    commit_ts = max(commit_ts, rts + 1);
                 }
-            }
-
-            self_metrics.wait_duration += clock64() - lock_st_time;
-
-            unsigned long long commit_ts = 0;
-            unsigned long long rts;
-            timestamp_t ts;
-
-#pragma unroll
-            for (int i = 0; i < WCNT; i++)
-            {
-                ts.ll = WS[i].entry->ll;
-                rts = ts.s.wts + ts.s.delta;
-                commit_ts = max(commit_ts, rts + 1);
             }
 
 #pragma unroll
@@ -316,8 +312,7 @@ namespace cc
                         if (
                             RS[i].wts != wts ||
                             (rts <= commit_ts &&
-                             ts1.s.lock_bit &&
-                             !for_update[i]))
+                             ts1.s.lock_bit))
                         {
                             // TODO Abort
                             for (int j = 0; j < WCNT; j++)
@@ -334,7 +329,8 @@ namespace cc
                             ts2.s.wts += shift;
                             ts2.s.delta = delta - shift;
                             fail = atomicCAS(&(RS[i].entry->ll), ts1.ll, ts2.ll) != ts1.ll;
-                            if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                            if (fail)
+                                self_metrics.wait_duration += clock64() - wait_st_time;
                         }
                     } while (fail);
                 }
@@ -343,8 +339,8 @@ namespace cc
 #ifdef TX_DEBUG
             for (int i = 0; i < WCNT; i++)
                 common::AddEvent(self_events + RCNT + i,
-                                    WS[i].entry - ((timestamp_t *)TICTOC_TS_TABLE),
-                                    0, 0, self_tid, 1);
+                                 WS[i].entry - ((timestamp_t *)TICTOC_TS_TABLE),
+                                 0, 0, self_tid, 1);
 #endif
             return commit_ts;
         }
@@ -360,7 +356,10 @@ namespace cc
             {
                 replica_entry &entry = WS[i];
                 volatile timestamp_t &ts = *((volatile timestamp_t *)entry.entry);
-                memcpy(entry.dstdata, entry.srcdata, entry.size);
+                if (entry.wts == ~0ULL)
+                    memcpy(entry.dstdata, entry.srcdata, entry.size);
+                else
+                    memcpy(entry.srcdata, entry.dstdata, entry.size);
                 ts.s.wts = commit_ts;
                 ts.s.delta = 0;
                 unlock(entry.entry);
@@ -375,7 +374,6 @@ namespace cc
     public:
         timestamp_t *ts_table;
         replica_entry *replica_entries;
-        char *for_update;
 
         common::TransactionSet_CPU *info;
         common::DB_CPU *db_cpu;
@@ -385,25 +383,12 @@ namespace cc
         Tictoc_CPU(common::DB_CPU *db, common::TransactionSet_CPU *txinfo, size_t bsize)
             : info(txinfo),
               db_cpu(db),
+              tictoc_gpu_info(nullptr),
               dynamic(typeid(*info) == typeid(common::DynamicTransactionSet_CPU)),
               ConcurrencyControlCPUBase(bsize, txinfo->GetTxCnt(), db->table_st[db->table_cnt])
         {
             cudaMalloc(&ts_table, sizeof(timestamp_t *) * db->table_st[db->table_cnt]);
             cudaMalloc(&replica_entries, sizeof(replica_entry) * txinfo->GetTotOpCnt());
-
-            if (dynamic)
-            {
-                common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                cudaMalloc(&for_update, sizeof(char) * dtx->GetTotR());
-                DynamicTictocInfo *tmp = new DynamicTictocInfo(for_update);
-                cudaMalloc(&tictoc_gpu_info, sizeof(DynamicTictocInfo));
-                cudaMemcpy(tictoc_gpu_info, tmp, sizeof(DynamicTictocInfo), cudaMemcpyHostToDevice);
-                delete tmp;
-            }
-            else
-            {
-                tictoc_gpu_info = nullptr;
-            }
         }
 
         void Init(int batch_id, int batch_st) override
@@ -431,7 +416,7 @@ namespace cc
             if (dynamic)
             {
                 common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                return common_sz + sizeof(int) * tx_cnt * 2 + sizeof(size_t) * (tx_cnt + 1) * 2 + sizeof(char) * dtx->GetTotR() + sizeof(DynamicTictocInfo);
+                return common_sz + sizeof(int) * tx_cnt * 2 + sizeof(size_t) * (tx_cnt + 1) * 2 + sizeof(char) * dtx->GetTotR();
             }
             return common_sz;
         }

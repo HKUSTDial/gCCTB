@@ -52,14 +52,6 @@ namespace cc
     //                                                                         replica_entries(replica_entries) {}
     // };
 
-    struct __align__(8) DynamicSiloInfo
-    {
-        char *for_update;
-
-        __host__ __device__ DynamicSiloInfo() {}
-        __host__ __device__ DynamicSiloInfo(char *for_update) : for_update(for_update) {}
-    };
-
 #ifndef SILO_RUN
 
 #define SILO_TS_TABLE 0
@@ -78,11 +70,8 @@ namespace cc
 
 #ifdef DYNAMIC_RW_COUNT
         common::DynamicTransactionSet_GPU *txset_info;
-        char *for_update;
         int rcnt;
         int wcnt;
-#else
-        char for_update[RCNT];
 #endif
 
 #ifdef TX_DEBUG
@@ -98,8 +87,6 @@ namespace cc
             txset_info = (common::DynamicTransactionSet_GPU *)txs_info;
             rcnt = txset_info->tx_rcnt[tid];
             wcnt = txset_info->tx_wcnt[tid];
-            DynamicSiloInfo *tinfo = (DynamicSiloInfo *)info;
-            for_update = tinfo->for_update + txset_info->tx_rcnt_st[tid];
             self_r_replica_entries = ((silo_replica_entry *)SILO_REPLICA_ENTRIES) + txset_info->tx_opcnt_st[tid];
 #ifdef TX_DEBUG
             self_events = ((common::Event *)EVENTS_ST) + txset_info->tx_opcnt_st[self_tid] + self_tid;
@@ -116,7 +103,6 @@ namespace cc
         __device__ bool TxStart(void *info)
         {
             st_time = clock64();
-            memset(for_update, 0, sizeof(char) * RCNT);
             self_metrics.manager_duration = clock64() - st_time;
             self_metrics.wait_duration = 0;
             return true;
@@ -161,11 +147,10 @@ namespace cc
             unsigned long long manager_st_time = clock64();
             get_entry(
                 ((silo_timestamp_t *)SILO_TS_TABLE) + obj_idx,
-                self_r_replica_entries + tx_idx,
+                self_w_replica_entries + tx_idx,
                 srcdata,
                 dstdata,
                 size);
-            for_update[tx_idx] = 1;
             self_metrics.manager_duration += clock64() - manager_st_time;
             return true;
         }
@@ -183,6 +168,7 @@ namespace cc
             entry.srcdata = srcdata;
             entry.dstdata = dstdata;
             entry.size = size;
+            entry.ts = ~0ULL;
             self_metrics.manager_duration += clock64() - manager_st_time;
             return true;
         }
@@ -238,22 +224,23 @@ namespace cc
             //     memcpy(dstdata, srcdata, size);
             //     ts2.ll = ((volatile silo_timestamp_t *)entry)->ll;
             // } while (ts1.ll != ts2.ll || ts1.s.lock_bit);
-            while(true)
+            while (true)
             {
                 unsigned long long wait_st_time = clock64();
                 ts1.ll = ((volatile silo_timestamp_t *)entry)->ll;
                 memcpy(dstdata, srcdata, size);
                 ts2.ll = ((volatile silo_timestamp_t *)entry)->ll;
-                if(ts1.ll != ts2.ll || ts1.s.lock_bit) {
+                if (ts1.ll != ts2.ll || ts1.s.lock_bit)
+                {
                     self_metrics.wait_duration += clock64() - wait_st_time;
                     continue;
                 }
                 break;
             }
 #ifdef TX_DEBUG
-                common::AddEvent(self_events + (ret - self_r_replica_entries),
-                                 entry - ((silo_timestamp_t *)SILO_TS_TABLE),
-                                 ts1.ll, 0, self_tid, 0);
+            common::AddEvent(self_events + (ret - self_r_replica_entries),
+                             entry - ((silo_timestamp_t *)SILO_TS_TABLE),
+                             ts1.ll, 0, self_tid, 0);
 #endif
             ret->ts = ts1.s.ts;
         }
@@ -263,12 +250,13 @@ namespace cc
             silo_replica_entry *RS = self_r_replica_entries;
             silo_replica_entry *WS = self_w_replica_entries;
 
-            long long lock_st_time = clock64();
+            unsigned long long commit_ts = 0;
 
             { // TODO sort WS
 #pragma unroll
                 for (int i = 0; i < WCNT; i++)
                 {
+                    long long lock_st_time = clock64();
                     if (!lock(WS[i].entry))
                     {
                         for (int j = 0; j < i; j++)
@@ -277,23 +265,33 @@ namespace cc
                         self_metrics.abort_duration += clock64() - st_time;
                         return ~0ULL;
                     }
+                    self_metrics.wait_duration += clock64() - lock_st_time;
+
+                    silo_timestamp_t ts;
+                    ts.ll = ((volatile silo_timestamp_t *)WS[i].entry)->ll;
+                    unsigned long long wts = WS[i].ts;
+                    if (wts != ~0ULL)
+                    {
+                        if (ts.s.ts != wts)
+                        {
+                            for (int j = 0; j <= i; j++)
+                                unlock(WS[j].entry);
+                            self_metrics.abort++;
+                            self_metrics.abort_duration += clock64() - st_time;
+                            return ~0ULL;
+                        }
+                    }
+                    commit_ts = max(commit_ts, ts.s.ts);
                 }
             }
 
-            self_metrics.wait_duration += clock64() - lock_st_time;
-
-            unsigned long long commit_ts = 0;
-
 #pragma unroll
-            for (int i = 0; i < RCNT; i++)
-                commit_ts = max(commit_ts, RS[i].ts);
-
             for (int i = 0; i < RCNT; i++)
             {
                 silo_timestamp_t ts;
                 ts.ll = ((volatile silo_timestamp_t *)RS[i].entry)->ll;
 
-                if (ts.s.ts != RS[i].ts || (ts.s.lock_bit && !for_update[i]))
+                if (ts.s.ts != RS[i].ts || ts.s.lock_bit)
                 {
                     for (int j = 0; j < WCNT; j++)
                         unlock(WS[j].entry);
@@ -301,12 +299,7 @@ namespace cc
                     self_metrics.abort_duration += clock64() - st_time;
                     return ~0ULL;
                 }
-            }
-
-            {
-#pragma unroll
-                for (int i = 0; i < WCNT; i++)
-                    commit_ts = max(commit_ts, WS[i].ts);
+                commit_ts = max(commit_ts, ts.s.ts);
             }
 
 #ifdef TX_DEBUG
@@ -331,7 +324,10 @@ namespace cc
             {
                 silo_replica_entry &entry = WS[i];
                 volatile silo_timestamp_t &ts = *((volatile silo_timestamp_t *)entry.entry);
-                memcpy(entry.dstdata, entry.srcdata, entry.size);
+                if (entry.ts == ~0ULL)
+                    memcpy(entry.dstdata, entry.srcdata, entry.size);
+                else
+                    memcpy(entry.srcdata, entry.dstdata, entry.size);
                 ts.s.ts = commit_ts;
                 unlock(entry.entry);
             }
@@ -345,7 +341,6 @@ namespace cc
     public:
         silo_timestamp_t *ts_table;
         silo_replica_entry *replica_entries;
-        char *for_update;
 
         common::TransactionSet_CPU *info;
         common::DB_CPU *db_cpu;
@@ -355,25 +350,12 @@ namespace cc
         Silo_CPU(common::DB_CPU *db, common::TransactionSet_CPU *txinfo, size_t bsize)
             : info(txinfo),
               db_cpu(db),
+              silo_gpu_info(nullptr),
               dynamic(typeid(*info) == typeid(common::DynamicTransactionSet_CPU)),
               ConcurrencyControlCPUBase(bsize, txinfo->GetTxCnt(), db->table_st[db->table_cnt])
         {
             cudaMalloc(&ts_table, sizeof(silo_timestamp_t *) * db->table_st[db->table_cnt]);
             cudaMalloc(&replica_entries, sizeof(silo_replica_entry) * txinfo->GetTotOpCnt());
-
-            if (dynamic)
-            {
-                common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                cudaMalloc(&for_update, sizeof(char) * dtx->GetTotR());
-                DynamicSiloInfo *tmp = new DynamicSiloInfo(for_update);
-                cudaMalloc(&silo_gpu_info, sizeof(DynamicSiloInfo));
-                cudaMemcpy(silo_gpu_info, tmp, sizeof(DynamicSiloInfo), cudaMemcpyHostToDevice);
-                delete tmp;
-            }
-            else
-            {
-                silo_gpu_info = nullptr;
-            }
         }
 
         void Init(int batch_id, int batch_st) override
@@ -401,7 +383,7 @@ namespace cc
             if (dynamic)
             {
                 common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                return common_sz + sizeof(int) * tx_cnt * 2 + sizeof(size_t) * (tx_cnt + 1) * 2 + sizeof(char) * dtx->GetTotR() + sizeof(DynamicSiloInfo);
+                return common_sz + sizeof(int) * tx_cnt * 2 + sizeof(size_t) * (tx_cnt + 1) * 2 + sizeof(char) * dtx->GetTotR();
             }
             return common_sz;
         }

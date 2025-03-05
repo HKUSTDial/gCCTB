@@ -28,28 +28,6 @@ namespace cc
         lock_info_t *lock;
     };
 
-    // struct TwoPLInfo
-    // {
-    //     lock_info_t *lock_table;
-    //     lock_info_t **lock_hold_info_r;
-    //     TPLWriteInfo *lock_hold_info_w;
-
-    //     __host__ __device__ TwoPLInfo() {}
-    //     __host__ __device__ TwoPLInfo(lock_info_t *lock_table,
-    //                                   lock_info_t **lock_hold_info_r,
-    //                                   TPLWriteInfo *lock_hold_info_w) : lock_table(lock_table),
-    //                                                                     lock_hold_info_r(lock_hold_info_r),
-    //                                                                     lock_hold_info_w(lock_hold_info_w) {}
-    // };
-
-    struct DynamicTwoPLInfo
-    {
-        char *for_update;
-
-        __host__ __device__ DynamicTwoPLInfo() {}
-        __host__ __device__ DynamicTwoPLInfo(char *for_update) : for_update(for_update) {}
-    };
-
 #ifndef TPL_RUN
 #define LOCK_TABLE 0
 #define LOCK_HOLD_INFO_R 0
@@ -73,11 +51,8 @@ namespace cc
 
 #ifdef DYNAMIC_RW_COUNT
         common::DynamicTransactionSet_GPU *txset_info;
-        char *for_update;
         int rcnt;
         int wcnt;
-#else
-        char for_update[RCNT];
 #endif
 
         __device__ TwoPL_GPU(void *txs_info, void *info, size_t tid)
@@ -89,10 +64,8 @@ namespace cc
             txset_info = (common::DynamicTransactionSet_GPU *)txs_info;
             rcnt = txset_info->tx_rcnt[self_tid];
             wcnt = txset_info->tx_wcnt[self_tid];
-            DynamicTwoPLInfo *tinfo = (DynamicTwoPLInfo *)info;
             lock_hold_info_r = ((lock_info_t **)LOCK_HOLD_INFO_R) + txset_info->tx_rcnt_st[self_tid];
             lock_hold_info_w = ((TPLWriteInfo *)LOCK_HOLD_INFO_W) + txset_info->tx_wcnt_st[self_tid];
-            for_update = tinfo->for_update + txset_info->tx_rcnt_st[self_tid];
 
 #ifdef TX_DEBUG
             self_events = ((common::Event *)EVENTS_ST) + txset_info->tx_opcnt_st[self_tid] + self_tid;
@@ -112,7 +85,6 @@ namespace cc
         __device__ bool TxStart(void *info)
         {
             st_time = clock64();
-            memset(for_update, 0, sizeof(bool) * RCNT);
             max_r = max_w = -1;
             self_metrics.manager_duration = clock64() - st_time;
             self_metrics.wait_duration = 0;
@@ -127,12 +99,7 @@ namespace cc
 #endif
 #pragma unroll
             for (int i = 0; i < RCNT; i++)
-            {
-                if (for_update[i])
-                    unlock_exclusive(lock_hold_info_r[i]);
-                else
-                    unlock_shared(lock_hold_info_r[i]);
-            }
+                unlock_shared(lock_hold_info_r[i]);
 
 #pragma unroll
             for (int i = 0; i < WCNT; i++)
@@ -183,13 +150,16 @@ namespace cc
                 rollback();
                 return false;
             }
-            max_r = max(max_r, tx_idx);
-            for_update[tx_idx] = 1;
-            lock_hold_info_r[tx_idx] = info;
             memcpy(dstdata, srcdata, size);
+            max_w = max(max_w, tx_idx);
+            TPLWriteInfo &winfo = lock_hold_info_w[tx_idx];
+            winfo.srcdata = dstdata;
+            winfo.dstdata = srcdata;
+            winfo.size = size;
+            winfo.lock = info;
             self_metrics.manager_duration += clock64() - manager_st_time;
 #ifdef TX_DEBUG
-            common::AddEvent(self_events + tx_idx, obj_idx, info->ll, 0, self_tid, 0);
+            common::AddEvent(self_events + RCNT + tx_idx, obj_idx, info->ll, 0, self_tid, 1);
 #endif
             return true;
         }
@@ -261,7 +231,8 @@ namespace cc
                 }
 
                 fail = atomicCAS(&(info->ll), ts1.ll, ts2.ll) != ts1.ll;
-                if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                if (fail)
+                    self_metrics.wait_duration += clock64() - wait_st_time;
             } while (fail);
             return true;
         }
@@ -280,7 +251,8 @@ namespace cc
                     ts2.s.holder_cnt = 1;
                     ts2.s.holder = self_tid;
                     fail = atomicCAS(&(info->ll), ts1.ll, ts2.ll) != ts1.ll;
-                    if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                    if (fail)
+                        self_metrics.wait_duration += clock64() - wait_st_time;
                 }
                 else if (ts1.s.shared)
                     return false;
@@ -328,12 +300,7 @@ namespace cc
 #ifdef DYNAMIC_RW_COUNT
 #pragma unroll
             for (int i = 0; i <= max_r; i++)
-            {
-                if (for_update[i])
-                    unlock_exclusive(lock_hold_info_r[i]);
-                else
-                    unlock_shared(lock_hold_info_r[i]);
-            }
+                unlock_shared(lock_hold_info_r[i]);
 
 #pragma unroll
             for (int i = 0; i <= max_w; i++)
@@ -344,23 +311,13 @@ namespace cc
             {
 #pragma unroll
                 for (int i = 0; i < RCNT; i++)
-                {
-                    if (for_update[i])
-                        unlock_exclusive(lock_hold_info_r[i]);
-                    else
-                        unlock_shared(lock_hold_info_r[i]);
-                }
+                    unlock_shared(lock_hold_info_r[i]);
             }
             else
             {
 #pragma unroll
                 for (int i = 0; i <= max_r; i++)
-                {
-                    if (for_update[i])
-                        unlock_exclusive(lock_hold_info_r[i]);
-                    else
-                        unlock_shared(lock_hold_info_r[i]);
-                }
+                    unlock_shared(lock_hold_info_r[i]);
             }
 
             if (max_w + 1 == WCNT)
@@ -389,7 +346,6 @@ namespace cc
         lock_info_t *lock_table;
         lock_info_t **lock_hold_info_r;
         TPLWriteInfo *lock_hold_info_w;
-        char *for_update;
 
         common::TransactionSet_CPU *info;
         common::DB_CPU *db_cpu;
@@ -401,6 +357,7 @@ namespace cc
             : info(txinfo),
               db_cpu(db),
               wait_die(wait_die),
+              twopl_gpu_info(nullptr),
               dynamic(typeid(*info) == typeid(common::DynamicTransactionSet_CPU)),
               ConcurrencyControlCPUBase(bsize, txinfo->GetTxCnt(), db->table_st[db->table_cnt])
         {
@@ -411,20 +368,12 @@ namespace cc
                 common::DynamicTransactionSet_CPU *dyinfo = dynamic_cast<common::DynamicTransactionSet_CPU *>(info);
                 cudaMalloc(&lock_hold_info_r, sizeof(lock_info_t *) * dyinfo->GetTotR());
                 cudaMalloc(&lock_hold_info_w, sizeof(TPLWriteInfo) * dyinfo->GetTotW());
-                cudaMalloc(&for_update, sizeof(char) * dyinfo->GetTotR());
-
-                DynamicTwoPLInfo *tmp = new DynamicTwoPLInfo(for_update);
-                cudaMalloc(&twopl_gpu_info, sizeof(DynamicTwoPLInfo));
-                cudaMemcpy(twopl_gpu_info, tmp, sizeof(DynamicTwoPLInfo), cudaMemcpyHostToDevice);
-                delete tmp;
             }
             else
             {
                 common::StaticTransactionSet_CPU *stinfo = dynamic_cast<common::StaticTransactionSet_CPU *>(info);
                 cudaMalloc(&lock_hold_info_r, sizeof(lock_info_t *) * stinfo->rcnt * stinfo->tx_cnt);
                 cudaMalloc(&lock_hold_info_w, sizeof(TPLWriteInfo) * stinfo->wcnt * stinfo->tx_cnt);
-
-                twopl_gpu_info = nullptr;
             }
         }
 
@@ -457,7 +406,6 @@ namespace cc
             {
                 common::DynamicTransactionSet_CPU *dyinfo = (common::DynamicTransactionSet_CPU *)info;
                 return common_sz +
-                       sizeof(DynamicTwoPLInfo) +
                        sizeof(lock_info_t *) * dyinfo->GetTotR() + sizeof(TPLWriteInfo) * dyinfo->GetTotW() +
                        sizeof(bool) * dyinfo->GetTotR() +
                        sizeof(int) * tx_cnt * 2 +

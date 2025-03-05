@@ -118,13 +118,24 @@ namespace cc
             long long lock_st_time = clock64();
             lock(obj_idx);
             self_metrics.wait_duration += clock64() - lock_st_time;
-            memcpy(dstdata, srcdata, size);
-            unlock(obj_idx);
+            memcpy(srcdata, dstdata, size);
             self_metrics.manager_duration += clock64() - lock_st_time;
 #ifdef TX_DEBUG
-            common::AddEvent(self_events + tx_idx, obj_idx, 0, 0, self_tid, 0);
+            common::AddEvent(self_events + tx_idx, obj_idx, 0, 0, self_tid, 1);
 #endif
             return true;
+        }
+
+        __device__ void ReadForUpdateEnd(
+            size_t obj_idx,
+            void *srcdata,
+            void *dstdata,
+            size_t size)
+        {
+            long long mng_st_time = clock64();
+            memcpy(srcdata, dstdata, size);
+            unlock(obj_idx);
+            self_metrics.manager_duration += clock64() - mng_st_time;
         }
 
         __device__ bool Write(

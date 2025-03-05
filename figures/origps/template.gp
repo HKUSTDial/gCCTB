@@ -1,13 +1,13 @@
 ############  几十行代码急速入门Gnuplot数据绘图   ###################################
 ### "#" 后边是注释
 ### 首先设置输出的格式，支持pdf,png,eps等常用格式
-set terminal pngcairo size 1000,1000 font 'Times New Roman,10'   ## 格式，大小和字体
+set terminal pngcairo size 1000,1000 font 'Arial New Roman,10'   ## 格式，大小和字体
 set output "plot.png"  ###输出的文件名
 
-#set terminal pdfcairo size 20cm,20cm font 'Times New Roman,12'  ## 
+#set terminal pdfcairo size 20cm,20cm font 'Arial New Roman,12'  ## 
 #set output "plot.pdf"
 
-#set terminal epscairo size 20cm,20cm font 'Times New Roman,12'  ## 
+#set terminal epscairo size 20cm,20cm font 'Arial New Roman,12'  ## 
 #set output "plot.eps"
 
 ### 可以定义变量和宏，便于后边重复使用
@@ -29,7 +29,7 @@ set label "(1)" at graph 0.02,0.03 font ',20' textcolor rgb 'red'
 set title "example"
 set xlabel "This is xlabel with {/Symbol a}=0.1 to 100"
 set ylabel "This is ylabel with X^2_3"
-set key top right Left reverse font 'Times New Roman,15'  ###设置图例格式：位置、字体等
+set key top right Left reverse font 'Arial New Roman,15'  ###设置图例格式：位置、字体等
 f(x)=sin(x)/x          ###定义函数
 set xrange [0:100]     ###设置x轴范围
 set yrange [-0.5:1.0]  ###设置y轴范围

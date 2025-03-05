@@ -138,9 +138,9 @@ namespace cc
                 self_nodes[i].prev = current_version->prev;
                 current_version->prev = self_nodes + i;
 
-                auto offset = (self_nodes - (version_node *)VERSION_NODES) + i;
-                memcpy((version_node *)VERSION_DATA + offset, winfo.dstdata, winfo.size);
-                // memcpy(winfo.dstdata, winfo.srcdata, winfo.size);
+                // auto offset = (self_nodes - (version_node *)VERSION_NODES);
+                // memcpy((version_node *)VERSION_DATA + offset + i, winfo.dstdata, sizeof(version_node)); // winfo.size
+                memcpy(winfo.dstdata, winfo.srcdata, winfo.size);
 
                 current_version->ts.s.uncommited = 0;
                 // __threadfence();
@@ -195,7 +195,8 @@ namespace cc
                         memcpy(dstdata, (version_node *)VERSION_DATA + offset, size);
                         fail = entry->ts.ll != ts1.ll;
                     }
-                    if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                    if (fail)
+                        self_metrics.wait_duration += clock64() - wait_st_time;
                 }
                 else
                 {
@@ -216,7 +217,50 @@ namespace cc
             void *dstdata,
             size_t size)
         {
-            return Read(obj_idx, tx_idx, srcdata, dstdata, size);
+            unsigned long long manager_st_time = clock64();
+            version_node *entry = ((version_node *)VERSION_TABLE) + obj_idx;
+            mvcc_write_info *winfo = write_info + tx_idx;
+            winfo->verp = entry;
+
+            mvcc_timestamp_t ts1;
+            bool fail = true;
+            do
+            {
+                unsigned long long wait_st_time = clock64();
+                ts1.ll = ((volatile mvcc_timestamp_t *)(&(entry->ts)))->ll;
+                if (ts1.s.wts > self_ts || ts1.s.rts > self_ts || ts1.s.uncommited) // TODO Thomas
+                    break;
+                winfo->srcdata = dstdata;
+                winfo->dstdata = srcdata; //(void *)(self_nodes + tx_idx);
+                winfo->size = size;
+
+                mvcc_timestamp_t ts2;
+
+                ts2.s.uncommited = 1;
+                ts2.s.rts = self_ts;
+                ts2.s.wts = self_ts;
+
+                // memcpy(dstdata, srcdata, size);
+
+                fail = atomicCAS(&(entry->ts.ll), ts1.ll, ts2.ll) != ts1.ll;
+                if (fail)
+                    self_metrics.wait_duration += clock64() - wait_st_time;
+            } while (fail);
+            __threadfence();
+
+            if (fail)
+            {
+                rollback();
+                return false;
+            }
+
+#ifdef TX_DEBUG
+            common::AddEvent(self_events + RCNT + tx_idx, obj_idx, ts1.ll, self_ts, self_tid, 1);
+#endif
+            self_nodes[tx_idx].ts.ll = ts1.ll;
+            has_wts[tx_idx] = true;
+            self_metrics.manager_duration += clock64() - manager_st_time;
+            return true;
         }
 
         __device__ bool Write(
@@ -249,7 +293,8 @@ namespace cc
                 ts2.s.rts = self_ts;
                 ts2.s.wts = self_ts;
                 fail = atomicCAS(&(entry->ts.ll), ts1.ll, ts2.ll) != ts1.ll;
-                if(fail) self_metrics.wait_duration += clock64() - wait_st_time;
+                if (fail)
+                    self_metrics.wait_duration += clock64() - wait_st_time;
             } while (fail);
             __threadfence();
 
@@ -350,29 +395,12 @@ namespace cc
 
         void Init(int batch_id, int batch_st) override
         {
+            if (batch_id > 0)
+                CUDA_SAFE_CALL(cudaStreamSynchronize(streams[batch_id - 1]));
             cudaStreamCreate(streams.data() + batch_id);
-            cudaStream_t stream = streams[batch_id];
+            // cudaStream_t stream = streams[batch_id];
             ts_allocator->Init(batch_id, batch_st);
             cudaMemset(version_table, 0, sizeof(version_node) * db_cpu->table_st[db_cpu->table_cnt]);
-            if (dynamic)
-            {
-                common::DynamicTransactionSet_CPU *dtx = (common::DynamicTransactionSet_CPU *)info;
-                size_t totw = dtx->GetTotW();
-                cudaMemsetAsync(
-                    version_nodes + sizeof(version_node) * dtx->tx_wcnt_st[batch_st],
-                    0,
-                    sizeof(version_node) * (dtx->tx_wcnt_st[batch_st + batches[batch_id]] - dtx->tx_wcnt_st[batch_st]),
-                    stream);
-            }
-            else
-            {
-                common::StaticTransactionSet_CPU *stx = (common::StaticTransactionSet_CPU *)info;
-                cudaMemsetAsync(
-                    version_nodes + sizeof(version_node) * stx->wcnt * batch_st,
-                    0,
-                    sizeof(version_node) * stx->wcnt * batches[batch_id],
-                    stream);
-            }
         }
 
         void GetCompileOptions(std::vector<std::string> &opts) override

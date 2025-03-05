@@ -1,11 +1,15 @@
 # gCCTB
 
-## Overview
+## :dizzy:Overview
 
 gCCTB is a testbed designed to evaluate various concurrency control schemes in GPU environments comprehensively. 
 gCCTB allows for easy and efficient testing of different CC schemes on GPUs using a variety of benchmarks under different configurations.
 
-## Features
+<p align="center">
+<img width="800" src="./figures/arch1.png"/>
+</p>
+
+## :balloon:Features
 
 ### Supported CC Schemes
 
@@ -42,13 +46,13 @@ gCCTB allows for easy and efficient testing of different CC schemes on GPUs usin
 - CUDA 12.0
 - Python3
 
-## Build
+## :wrench:Build
 
 ```
 python3 compile.py
 ```
 
-## Useage
+## :rocket:Useage
 
 ### Dataset Generation
 ```
@@ -76,16 +80,15 @@ where $warp\_density \in [0,5], block\_size \in [0,32]$
 ```
 where `avr_tot_d` corresponds to the `Average GPU Duration` measured on GPU, `avr_proc` corresponds to the `Average GPU Duration` measured on CPU, `avr_tot` corresponds to the `Average Total Duration`.
 
-## Experiment Data
+## :floppy_disk:Experiment Data
 
 Experiment data is listed in `out_data` directory.
 
-## TODO
+## :dart:TODO
 
-- TPC-C Support
 - More Indexes
 
-## Related Projects
+## :open_book:Related Projects
 
 ### [DBx1000](https://github.com/yxymit/DBx1000) 
 

@@ -107,7 +107,9 @@ namespace cc
             void *dstdata,
             size_t size)
         {
+            long long mng_st_time = clock64();
             memcpy(dstdata, srcdata, size);
+            self_metrics.manager_duration += clock64() - mng_st_time;
 #ifdef TX_DEBUG
             common::AddEvent(self_events + tx_idx, obj_idx, 0, self_rank, self_tid, 0);
 #endif
@@ -121,11 +123,24 @@ namespace cc
             void *dstdata,
             size_t size)
         {
+            long long mng_st_time = clock64();
             memcpy(dstdata, srcdata, size);
+            self_metrics.manager_duration += clock64() - mng_st_time;
 #ifdef TX_DEBUG
-            common::AddEvent(self_events + tx_idx, obj_idx, 0, self_rank, self_tid, 0);
+            common::AddEvent(self_events + tx_idx, obj_idx, 0, self_rank, self_tid, 1);
 #endif
             return true;
+        }
+
+        __device__ void ReadForUpdateEnd(
+            size_t obj_idx,
+            void *srcdata,
+            void *dstdata,
+            size_t size)
+        {
+            long long mng_st_time = clock64();
+            memcpy(srcdata, dstdata, size);
+            self_metrics.manager_duration += clock64() - mng_st_time;
         }
 
         __device__ bool Write(
@@ -135,7 +150,9 @@ namespace cc
             void *dstdata,
             size_t size)
         {
+            long long mng_st_time = clock64();
             memcpy(dstdata, srcdata, size);
+            self_metrics.manager_duration += clock64() - mng_st_time;
 #ifdef TX_DEBUG
             common::AddEvent(self_events + RCNT + tx_idx, obj_idx, 0, self_rank, self_tid, 1);
 #endif
@@ -301,8 +318,14 @@ namespace cc
         void Init(int batch_id, int batch_st) override
         {
             if (batch_id)
+            {
                 cudaStreamSynchronize(streams[batch_id - 1]);
-            cudaStreamCreate(streams.data() + batch_id);
+                streams[batch_id] = streams[batch_id - 1];
+            }
+            else
+            {
+                cudaStreamCreate(streams.data() + batch_id);
+            }
         }
 
         void GetCompileOptions(std::vector<std::string> &opts) override
