@@ -6,7 +6,7 @@ gCCTB is a testbed designed to evaluate various concurrency control schemes in G
 gCCTB allows for easy and efficient testing of different CC schemes on GPUs using a variety of benchmarks under different configurations.
 
 <p align="center">
-<img width="800" src="./figures/arch1.png"/>
+<img width="900" src="./figures/arch1.png"/>
 </p>
 
 ## :balloon:Features
